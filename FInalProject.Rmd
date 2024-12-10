@@ -1,0 +1,234 @@
+---
+title: "Final Project Presentation"
+author: "Ethan Blauw"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(randomForest)
+library(caret)
+library(tidyverse)
+library(dplyr)
+library(rpart)
+library(yardstick)
+library(partykit)
+library(tidymodels)
+library(broom)
+library(rattle)
+library(rpart.plot)
+library(RColorBrewer)
+song_data <- read.csv("spotify_songs.csv")
+```
+
+## Intro and Hypotheses
+
+I chose to do my project on a dataset containing around 30,000 songs from spotify with corresponding data.
+
+My research questions are: Can we predict the popularity of a specific song from the variables provided above? Can we predict the genre of the song from the variable above?
+
+My hypothesis for these questions are: We can predict the popularity within (hopefully) a small margin of error (1 - 5 'popularity points'). We can predict the genre of the a song based on the variables above.
+
+Start off with by looking at what data we have:
+
+```{r}
+head(song_data)
+```
+
+```{r echo=FALSE, warning=FALSE}
+song_data <- song_data %>%
+  distinct(track_id, .keep_all = T) %>%
+  na.omit(song_data)
+
+
+factors_vector <- c('0' = 'C', '1' = 'C#', '2' = 'D', '3' = 'D#', '4' = 'E', '5' = 'F', '6' = 'F#', '7' = 'G', '8' = 'G#', '9' = 'A', '10' = 'A#', '11' = 'B', '-1' = 'NaN')
+song_data <- song_data %>%
+  mutate(key = factors_vector[as.character(key)]) %>%
+  mutate(key = as.factor(key))
+
+song_data <- song_data %>%
+  mutate(playlist_genre = as.factor(playlist_genre))
+
+song_data <- song_data %>%
+  mutate(duration_m = duration_ms / 60000)
+
+song_data <- song_data %>%
+  mutate(song_year = substr(track_album_release_date, start = 1, stop = 4)) %>%
+  mutate(song_year = as.numeric(song_year))
+
+song_data <- song_data %>%
+  select(c(track_name, 
+           track_artist, 
+           track_popularity, 
+           track_album_release_date, 
+           playlist_genre,
+           danceability, 
+           energy, 
+           key, 
+           loudness, 
+           mode, 
+           speechiness, 
+           acousticness, 
+           instrumentalness, 
+           liveness, 
+           valence, 
+           tempo, 
+           duration_m, 
+           song_year))
+song_data <- song_data %>%
+  mutate(song_rating = ifelse(track_popularity <= 25, "garbage", ifelse(track_popularity <= 50, "decent", ifelse(track_popularity <= 75, "good", "exceptional")))) %>%
+  mutate(song_rating = as.factor(song_rating))
+```
+
+There is too much information for it all to be helpful, so lets clean some of it up. There is a lot of code here so I will just tell you what I did.
+
+## Data Cleaning
+
+First off, select the columns that we want. There are a lot, so instead I will tell you what I did not take. Those columns are track_id, track_album_id, playlist_id, and playlist_subgenre.
+
+Next I cleaned up the data by changing some columns into factors such as key and playlist_genre, and removed all of the duplicate entries in the dataset. I also turned the key column into the actual music key notation for better understanding.
+
+Lastly, I created extra columns, one called duration_m which is the duration of the song in minutes not milliseconds, song_rating which is a factor of 4 elements consisting of garbage, decent, good, and exceptional in increments of 25, and song_year, which is the year from the track_album_release_date column.
+
+## Summarizing the Data
+
+Now lets summarize the data.
+
+```{r}
+song_data %>%
+  summarise(
+    mean_popularity = mean(track_popularity),
+    .by = key
+  ) %>%
+  arrange(desc(mean_popularity))
+song_data %>%
+  summarise(
+    mean_popularity = mean(track_popularity),
+    .by = playlist_genre
+  ) %>%
+  arrange(desc(mean_popularity))
+song_data %>%
+  summarize(
+    count = n(),
+    .by = key
+  ) %>%
+  arrange(desc(count))
+```
+
+## Plotting the Data
+
+Now lets look at some plots for a better understanding of the data
+
+```{r echo=FALSE, warning=FALSE}
+ggplot(song_data, aes(x = key, fill = playlist_genre)) +
+  geom_bar(position = "dodge", stat = "count") +
+  ggtitle('Distribution of Key by Genre') +
+  xlab('Key') +
+  ylab('Count') +
+  scale_alpha(range = c(0.3, 0.8))
+
+ggplot(song_data, aes(x = song_year, y = track_popularity, color = playlist_genre, alpha = .2)) +
+  geom_count() +
+  ggtitle('Song Year vs. Track Popularity') +
+  xlab('Song Year') +
+  ylab('Track Popularity') +
+  scale_x_continuous(breaks = seq(min(song_data$song_year), max(song_data$song_year), by = 10))
+
+ggplot(song_data, aes(x = track_popularity, y = duration_m, color = song_rating, alpha = 0.2)) +
+  geom_count() +
+  ggtitle('Track Popularity vs. Duration') +
+  xlab('Track Popularity') +
+  ylab('Song Duration (m)')
+```
+
+## Research questions
+
+After all of that great exploration, lets get back to the research questions. I want to try to predict the track_popularity variable using the data above. I did this by creating a random forest and training it on some training data, then testing it on both the test_data, and the whole dataset.
+
+```{r}
+sample_index <- sample(1:nrow(song_data), 0.8 * nrow(song_data))
+train_data <- song_data[sample_index, ]
+test_data <- song_data[-sample_index, ]
+
+# Train a random forest model for regression
+pop_model <- randomForest(track_popularity ~ danceability + energy + key + loudness + mode + speechiness + acousticness + instrumentalness + liveness + valence + tempo + duration_m, data = train_data, ntree = 100)
+
+# Predict the track_popularity on the test set
+predictions <- predict(pop_model, newdata = test_data)
+
+# Print the Mean Squared Error (MSE)
+mse <- mean((test_data$track_popularity - predictions)^2)
+print(paste("Mean Squared Error:", mse))
+
+```
+
+Now what is the accuracy of our model, giving our selves 10 points of error:
+
+```{r echo=FALSE, warning=FALSE}
+new_pred <- test_data %>%
+  select(track_popularity) %>%
+  bind_cols(
+    data.frame(new_predictions = predict(pop_model, newdata = test_data))
+  )
+threshold <- 10
+
+# Calculate accuracy as the percentage of predictions within the threshold
+accuracy <- mean(abs(new_pred$track_popularity - new_pred$new_predictions) <= threshold) * 100
+
+# Print the accuracy
+cat("Accuracy:", round(accuracy, 2), "%\n")
+```
+
+What about within 5 points:
+
+```{r echo=FALSE, warning=FALSE}
+new_pred <- test_data %>%
+  select(track_popularity) %>%
+  bind_cols(
+    data.frame(new_predictions = predict(pop_model, newdata = test_data))
+  )
+threshold <- 5
+
+# Calculate accuracy as the percentage of predictions within the threshold
+accuracy <- mean(abs(new_pred$track_popularity - new_pred$new_predictions) <= threshold) * 100
+
+# Print the accuracy
+cat("Accuracy:", round(accuracy, 2), "%\n")
+```
+
+What about predicting song_rating?
+
+```{r}
+sample_index <- sample(1:nrow(song_data), 0.8 * nrow(song_data))
+train_data <- song_data[sample_index, ]
+test_data <- song_data[-sample_index, ]
+
+# Train a random forest model for regression
+rating_model <- randomForest(song_rating ~ danceability + energy + key + loudness + mode + speechiness + acousticness + instrumentalness + liveness + valence + tempo + duration_m, data = train_data, ntree = 100)
+
+# Predict the track_popularity on the test set
+predictions <- predict(rating_model, newdata = test_data)
+confusion <- confusionMatrix(test_data$song_rating, predictions)
+cat("Accuracy", round(confusion$overall["Accuracy"] * 100, 2), "%\n")
+```
+
+Lastly, what about the other question of predicting the genre? Well, lets do the same thing again, with less code to show this time.
+
+```{r warning=FALSE}
+sample_index <- sample(1:nrow(song_data), 0.8 * nrow(song_data))
+train_data <- song_data[sample_index, ]
+test_data <- song_data[-sample_index, ]
+
+genre_model <- randomForest(playlist_genre ~ track_artist + track_popularity + danceability + energy + key + loudness + mode + speechiness + acousticness + instrumentalness + liveness + valence + tempo + duration_m + song_year, data = train_data, ntree = 100)
+
+predictions <- predict(genre_model, newdata = test_data)
+confusion_genre <- confusionMatrix(test_data$playlist_genre, predictions)
+cat("Accuracy", round(confusion_genre$overall["Accuracy"] * 100, 2), "%\n")
+```
+
+What do these results mean? Well, considering that the popularity of a song is based on factors of each person listening to a song, or public awareness of the song, and many other features, predicting low on this is not surprising . On the other hand, it feels as though it should be able to predict the song_genre better given the aspects of the song in the dataset.
+
+## Conclusion
+
+I think I have accomplished at least my first research question to the best of my ability with the information I have, and although the prediction is not great, I can predict, with a certain level of accuracy, the genre of the playlist that the song came from.
